@@ -1,60 +1,61 @@
 package prioritylock
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type PriorityLock interface {
-	Lock()
-	Unlock()
+	LowPriorityUnlock()
+	LowPriorityLock()
 	HighPriorityLock()
 	HighPriorityUnlock()
 }
 
-// PriorityPreferenceLock implements a simple triple-mutex priority lock
-// patterns are like:
-//
-//	Low Priority would do: lock lowPriorityMutex, wait for high priority groups, lock nextToAccess, lock dataMutex, unlock nextToAccess, do stuff, unlock dataMutex, unlock lowPriorityMutex
-//	High Priority would do: increment high priority waiting, lock nextToAccess, lock dataMutex, unlock nextToAccess, do stuff, unlock dataMutex, decrement high priority waiting
 type PriorityPreferenceLock struct {
-	dataMutex           sync.Mutex
-	nextToAccess        sync.Mutex
-	lowPriorityMutex    sync.Mutex
-	highPriorityWaiting sync.WaitGroup
+	dataMutex         sync.Mutex
+	lowPriorityMutex  sync.Mutex
+	cond              *sync.Cond
+	highPriorityCount int32
 }
+
+var _ PriorityLock = (*PriorityPreferenceLock)(nil)
 
 func NewPriorityPreferenceLock() *PriorityPreferenceLock {
 	lock := PriorityPreferenceLock{
-		highPriorityWaiting: sync.WaitGroup{},
+		highPriorityCount: 0,
 	}
+	lock.cond = sync.NewCond(&lock.dataMutex)
 	return &lock
 }
 
-// Lock will acquire a low-priority lock
-// it must wait until both low priority and all high priority lock holders are released.
-func (lock *PriorityPreferenceLock) Lock() {
-	lock.lowPriorityMutex.Lock()
-	lock.highPriorityWaiting.Wait()
-	lock.nextToAccess.Lock()
-	lock.dataMutex.Lock()
-	lock.nextToAccess.Unlock()
+func (pl *PriorityPreferenceLock) HighPriorityLock() {
+	atomic.AddInt32(&pl.highPriorityCount, 1)
+	pl.dataMutex.Lock()
 }
 
-// Unlock will unlock the low-priority lock
-func (lock *PriorityPreferenceLock) Unlock() {
-	lock.dataMutex.Unlock()
-	lock.lowPriorityMutex.Unlock()
+func (pl *PriorityPreferenceLock) HighPriorityUnlock() {
+	atomic.AddInt32(&pl.highPriorityCount, -1)
+
+	if pl.highPriorityCount <= 0 {
+		pl.cond.Broadcast()
+	}
+	pl.dataMutex.Unlock()
+
 }
 
-// HighPriorityLock will acquire a high-priority lock
-// it must still wait until a low-priority lock has been released and then potentially other high priority lock contenders.
-func (lock *PriorityPreferenceLock) HighPriorityLock() {
-	lock.highPriorityWaiting.Add(1)
-	lock.nextToAccess.Lock()
-	lock.dataMutex.Lock()
-	lock.nextToAccess.Unlock()
+func (pl *PriorityPreferenceLock) LowPriorityLock() {
+	pl.lowPriorityMutex.Lock()
+	pl.dataMutex.Lock()
+	for pl.highPriorityCount > 0 {
+		pl.cond.Wait()
+	}
+
 }
 
-// HighPriorityUnlock will unlock the high-priority lock
-func (lock *PriorityPreferenceLock) HighPriorityUnlock() {
-	lock.dataMutex.Unlock()
-	lock.highPriorityWaiting.Done()
+func (pl *PriorityPreferenceLock) LowPriorityUnlock() {
+	pl.dataMutex.Unlock()
+
+	pl.lowPriorityMutex.Unlock()
+
 }

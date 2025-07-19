@@ -31,10 +31,6 @@ func GetGlobalLock() *Lock {
 	return globalLock
 }
 
-// ================================
-// ================================
-// ================================
-
 func (l *Lock) Get(key string) prioritylock.PriorityLock {
 	priorityLock := prioritylock.NewPriorityPreferenceLock()
 	pl := l.locks.LoadOrSet(key, priorityLock)

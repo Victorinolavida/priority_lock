@@ -4,12 +4,6 @@ import (
 	"sync"
 )
 
-// type MapLock[T any] interface {
-// 	set(identifier string)
-// 	load(identifier string)
-// 	LoadOrSet(identifier string) T
-// }
-
 type MapLock[T any] struct {
 	mux       *sync.RWMutex
 	mapValues map[string]*T

@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
+	"reflect"
+	"strings"
 	"sync"
+	"testgg/lock"
+	prioritylock "testgg/priorityLock"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
 var (
@@ -14,99 +15,189 @@ var (
 	cancelKey = "cancel"
 )
 
-func TestUniqueLocker_SerialExecutionSameKey(t *testing.T) {
-	locker := GetLocks()
+func TestUniqueLocker(t *testing.T) {
+	numIsins := 10
+	numOrders := 10
+	lock := prioritylock.NewPriorityPreferenceLock()
 
-	// var mu sync.Mutex
-	totalProcess := 100
+	var isins []string
+	for i := range numIsins {
+		isin := fmt.Sprintf("MX%d", i)
+		isins = append(isins, isin)
+	}
+	totalProcessedOrderfs := len(isins) * numOrders * 2
 
-	results := make(chan string, totalProcess)
+	var wg sync.WaitGroup
+	wg.Add(totalProcessedOrderfs)
+	chanOrders := make(chan string, totalProcessedOrderfs)
 
-	wg := sync.WaitGroup{}
-	wg.Add(totalProcess)
+	for i, isin := range isins {
 
-	go func() {
-		for i := range totalProcess {
+		for range numOrders {
 			if i%2 == 0 {
-				continue
+				go func() {
+					lock.HighPriorityLock()
+					results := ProcessOrder(isin, cancelKey)
+					_, operation := splitResult(results)
+					chanOrders <- operation
+
+					wg.Done()
+					lock.HighPriorityUnlock()
+
+				}()
 			}
-			order, result := proccessOrder(100, cancelKey)
-			locker.Lock(order)
-			time.Sleep(10 * time.Millisecond) // aseguramos que el primero bloquee
-			locker.Unlock(order)
-
-			results <- result
-
-			wg.Done()
-
 		}
-	}()
-
-	go func() {
-
-		for i := range totalProcess {
+		for range numOrders {
 			if i%2 != 0 {
-				continue
+				go func() {
+					lock.HighPriorityLock()
+					results := ProcessOrder(isin, cancelKey)
+					_, operation := splitResult(results)
+					chanOrders <- operation
+					wg.Done()
+					lock.HighPriorityUnlock()
+
+				}()
 			}
-			order, result := proccessOrder(100, createKey)
-			locker.Lock(order)
-			time.Sleep(10 * time.Millisecond) // aseguramos que el primero bloquee
-			locker.Unlock(order)
-
-			results <- result
-
-			wg.Done()
 		}
 
-	}()
+		for range numOrders {
+			go func() {
+				lock.LowPriorityLock()
+				results := ProcessOrder(isin, createKey)
+				_, operation := splitResult(results)
+				chanOrders <- operation
+				wg.Done()
+				lock.LowPriorityUnlock()
 
-	wg.Wait()
-	close(results)
-	for r := range results {
-		fmt.Printf("%v\n", r)
+			}()
+		}
 	}
 
-	// La goroutine que hizo Lock primero debe haber ejecutado primero
+	wg.Wait()
+	close(chanOrders)
+	assertLen(t, totalProcessedOrderfs, chanOrders)
+	var totalCreated []string
+	var totalCancel []string
+	for result := range chanOrders {
+		switch result {
+		case cancelKey:
+			totalCancel = append(totalCancel, result)
+		case createKey:
+			totalCreated = append(totalCreated, result)
+		}
+	}
+
+	assertLen(t, totalProcessedOrderfs/2, totalCreated)
+	assertLen(t, totalProcessedOrderfs/2, totalCancel)
 }
-func TestUniqueLocker_ParallelExecutionDifferentKeys(t *testing.T) {
-	locker := GetLocks()
 
-	var result []int
-	var mu sync.Mutex
+func TestPriorityLockMap(t *testing.T) {
 
-	wg := sync.WaitGroup{}
-	wg.Add(2)
+	numIsins := 10
+	numOrders := 10
+	// lock := prioritylock.NewPriorityPreferenceLock()
+	globalLock := lock.GetGlobalLock()
 
-	go func() {
-		locker.Lock("order-A")
-		defer locker.Unlock("order-A")
-		defer wg.Done()
+	var isins []string
+	for i := range numIsins {
+		isin := fmt.Sprintf("MX%d", i)
+		isins = append(isins, isin)
+	}
+	totalProcessedOrderfs := len(isins) * numOrders * 2
 
-		time.Sleep(50 * time.Millisecond)
-		mu.Lock()
-		result = append(result, 1)
-		mu.Unlock()
-	}()
+	var wg sync.WaitGroup
+	wg.Add(totalProcessedOrderfs)
+	chanOrders := make(chan string, totalProcessedOrderfs)
 
-	go func() {
-		locker.Lock("order-B")
-		defer locker.Unlock("order-B")
-		defer wg.Done()
+	for i, isin := range isins {
 
-		time.Sleep(10 * time.Millisecond)
-		mu.Lock()
-		result = append(result, 2)
-		mu.Unlock()
-	}()
+		for range numOrders {
+			if i%2 == 0 {
+				go func() {
+					lock := globalLock.Get(isin)
+					lock.HighPriorityLock()
+					results := ProcessOrder(isin, cancelKey)
+					_, operation := splitResult(results)
+					chanOrders <- operation
+
+					wg.Done()
+					lock.HighPriorityUnlock()
+
+				}()
+			}
+		}
+		for range numOrders {
+			if i%2 != 0 {
+				go func() {
+					lock := globalLock.Get(isin)
+					lock.HighPriorityLock()
+					results := ProcessOrder(isin, cancelKey)
+					_, operation := splitResult(results)
+					chanOrders <- operation
+					wg.Done()
+					lock.HighPriorityUnlock()
+
+				}()
+			}
+		}
+
+		for range numOrders {
+			go func() {
+				lock := globalLock.Get(isin)
+				lock.LowPriorityLock()
+				results := ProcessOrder(isin, createKey)
+				_, operation := splitResult(results)
+				chanOrders <- operation
+				wg.Done()
+				lock.LowPriorityUnlock()
+
+			}()
+		}
+	}
 
 	wg.Wait()
+	close(chanOrders)
+	assertLen(t, totalProcessedOrderfs, chanOrders)
+	var totalCreated []string
+	var totalCancel []string
+	for result := range chanOrders {
+		switch result {
+		case cancelKey:
+			totalCancel = append(totalCancel, result)
+		case createKey:
+			totalCreated = append(totalCreated, result)
+		}
+	}
 
-	// Como las claves son distintas, el orden puede variar
-	assert.ElementsMatch(t, []int{1, 2}, result)
+	assertLen(t, totalProcessedOrderfs/2, totalCreated)
+	assertLen(t, totalProcessedOrderfs/2, totalCancel)
+
 }
 
-func proccessOrder(i int, process string) (string, string) {
-	id := fmt.Sprintf("order-%d\n", i)
-	fullProcess := fmt.Sprintf("%s ---> %s", process, id)
-	return id, fullProcess
+func splitResult(result string) (string, string) {
+	resultedSplit := strings.Split(result, ",")
+	if len(resultedSplit) != 2 {
+		return "", ""
+	}
+	return resultedSplit[0], resultedSplit[1]
+}
+
+func assertLen(t *testing.T, expected int, got any) {
+	t.Helper()
+
+	rv := reflect.ValueOf(got)
+
+	switch rv.Kind() {
+	case reflect.Array, reflect.Slice, reflect.Map, reflect.String, reflect.Chan:
+
+		gotLen := rv.Len()
+		if gotLen != expected {
+			t.Errorf("got %d, expected %d", gotLen, expected)
+		}
+
+	default:
+		t.Errorf("invalid data type %s", rv.Kind())
+	}
+
 }
